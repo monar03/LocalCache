@@ -9,20 +9,41 @@ import java.util.concurrent.TimeUnit
 
 class DiskCache(val cache: DiskLruCache) : Cache {
     override fun <T : Serializable> get(key: String): Single<T> {
-        return Single.create {
-            val v = ObjectInputStream(cache.get(key).getInputStream(0)).readObject() as CacheValue
-            if (v.timestamp >= System.currentTimeMillis()) {
-                v.value
-            } else {
-                throw IllegalStateException("cache expired")
+        return Single.create<T> { emitter ->
+            var input: ObjectInputStream? = null
+            try {
+                input = ObjectInputStream(cache.get(key).getInputStream(0))
+                val v = input.readObject() as CacheValue
+                input.close()
+                when {
+                    v.timestamp >= System.currentTimeMillis() -> emitter.onSuccess(v.value as T)
+                    v.timestamp < 0 -> emitter.onSuccess(v.value as T)
+                    else -> emitter.onError(IllegalStateException("cache expired"))
+                }
+            } catch (e: Exception) {
+                emitter.onError(e)
+            } finally {
+                input?.close()
             }
+
         }
     }
 
-    override fun <T : Serializable> set(key: String, value: T, interval: Long, timeUnit: TimeUnit): Single<Boolean> {
-        return Single.create {
-            ObjectOutputStream(cache.edit(key).newOutputStream(0))
-                    .writeObject(CacheValue(value, System.currentTimeMillis() + timeUnit.convert(interval, TimeUnit.MILLISECONDS)))
+    override fun <T : Serializable> set(key: String, value: T, interval: Long, timeUnit: TimeUnit) {
+        cache.edit(key).let {
+            val output = ObjectOutputStream(it.newOutputStream(0))
+            output.writeObject(
+                    CacheValue(
+                            value,
+                            if (interval >= 0) {
+                                System.currentTimeMillis() + timeUnit.convert(interval, TimeUnit.MILLISECONDS)
+                            } else {
+                                -1
+                            }))
+
+            output.close()
+            cache.flush()
+            it.commit()
         }
     }
 
