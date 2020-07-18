@@ -7,43 +7,45 @@ import java.io.ObjectOutputStream
 import java.io.Serializable
 import java.util.concurrent.TimeUnit
 
-class DiskCache(val cache: DiskLruCache) : Cache {
+class DiskCache(private val cache: DiskLruCache) : Cache {
     override fun <T : Serializable> get(key: String): Single<T> {
         return Single.create<T> { emitter ->
-            var input: ObjectInputStream? = null
             try {
-                input = ObjectInputStream(cache.get(key).getInputStream(0))
-                val v = input.readObject() as CacheValue
-                input.close()
-                when {
-                    v.timestamp >= System.currentTimeMillis() -> emitter.onSuccess(v.value as T)
-                    v.timestamp < 0 -> emitter.onSuccess(v.value as T)
-                    else -> emitter.onError(IllegalStateException("cache expired"))
+                ObjectInputStream(cache.get(key).getInputStream(0)).use {
+                    val v = it.readObject() as CacheValue<T>
+                    when {
+                        v.timestamp >= System.currentTimeMillis() -> emitter.onSuccess(v.value)
+                        v.timestamp < 0 -> emitter.onSuccess(v.value)
+                        else -> emitter.onError(IllegalStateException("cache expired"))
+                    }
                 }
             } catch (e: Exception) {
                 emitter.onError(e)
-            } finally {
-                input?.close()
             }
 
         }
     }
 
-    override fun <T : Serializable> set(key: String, value: T, interval: Long, timeUnit: TimeUnit) {
+    override fun <T : Serializable> set(key: String, value: T, interval: Long, timeUnit: TimeUnit): Boolean {
         cache.edit(key).let {
-            val output = ObjectOutputStream(it.newOutputStream(0))
-            output.writeObject(
-                    CacheValue(
-                            value,
-                            if (interval >= 0) {
-                                System.currentTimeMillis() + timeUnit.convert(interval, TimeUnit.MILLISECONDS)
-                            } else {
-                                -1
-                            }))
+            try {
+                ObjectOutputStream(it.newOutputStream(0)).use {
+                    it.writeObject(
+                            CacheValue(
+                                    value,
+                                    if (interval >= 0) {
+                                        System.currentTimeMillis() + timeUnit.convert(interval, TimeUnit.MILLISECONDS)
+                                    } else {
+                                        -1
+                                    }))
+                }
+                cache.flush()
+                it.commit()
+            } catch (e: Exception) {
+                return false
+            }
 
-            output.close()
-            cache.flush()
-            it.commit()
+            return true
         }
     }
 
@@ -51,5 +53,5 @@ class DiskCache(val cache: DiskLruCache) : Cache {
         cache.remove(key)
     }
 
-    class CacheValue(val value: Serializable, val timestamp: Long) : Serializable
+    class CacheValue<T>(val value: T, val timestamp: Long) : Serializable
 }
